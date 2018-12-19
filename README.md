@@ -79,6 +79,8 @@ Then enter your wi-fi network SSID and password in the WiFi.h file, and upload t
 Compression
 -----------
 
+Use gzipdata.sh and gunzipdata.sh !
+
 The web app files can be gzip compressed before uploading to SPIFFS by running the following command:
 
 `gzip -r data/`
@@ -99,3 +101,13 @@ Control via infrared remote control is also supported, via the [ESP8266 port of 
 
 [Adafruit NeoPixel Ring]:https://www.adafruit.com/product/1586
 [Adafruit HUZZAH ESP8266 Breakout]:https://www.adafruit.com/products/2471
+
+Button
+------
+
+Add button to D1 (Esp8266 NodeMcu) to change mode.
+
+
+Moon Icon
+---------
+Icon is from icon8: ic8.link/652

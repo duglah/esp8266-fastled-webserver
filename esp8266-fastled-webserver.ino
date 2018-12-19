@@ -20,6 +20,10 @@
 //#define INTERRUPT_THRESHOLD 1
 #define FASTLED_INTERRUPT_RETRY_COUNT 0
 
+//#define FASTLED_ESP8266_NODEMCU_PIN_ORDER
+#define FASTLED_ESP8266_RAW_PIN_ORDER
+//#define FASTLED_ESP8266_D1_PIN_ORDER
+
 #include <FastLED.h>
 FASTLED_USING_NAMESPACE
 
@@ -31,6 +35,7 @@ extern "C" {
 //#include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
+#include <DNSServer.h>
 //#include <WebSocketsServer.h>
 #include <FS.h>
 #include <EEPROM.h>
@@ -49,18 +54,23 @@ extern "C" {
 ESP8266WebServer webServer(80);
 //WebSocketsServer webSocketsServer = WebSocketsServer(81);
 ESP8266HTTPUpdateServer httpUpdateServer;
+DNSServer dnsServer;
 
 #include "FSBrowser.h"
 
 #define DATA_PIN      D5
 #define LED_TYPE      WS2811
 #define COLOR_ORDER   RGB
-#define NUM_LEDS      200
+#define NUM_LEDS      16
+
+#define BTN_TRASHHOLD 250 // in ms
+#define NEXT_BUTTON_PIN D1
 
 #define MILLI_AMPS         2000 // IMPORTANT: set the max milli-Amps of your power supply (4A = 4000mA)
 #define FRAMES_PER_SECOND  120  // here you can control the speed. With the Access Point / Web Server the animations run a bit slower.
 
-const bool apMode = false;
+const byte DNS_PORT = 53;
+const bool apMode = true;
 
 #include "Secrets.h" // this file is intentionally not included in the sketch, so nobody accidentally commits their secret information.
 // create a Secrets.h file with the following:
@@ -109,7 +119,7 @@ CRGBPalette16 gTargetPalette( gGradientPalettes[0] );
 
 CRGBPalette16 IceColors_p = CRGBPalette16(CRGB::Black, CRGB::Blue, CRGB::Aqua, CRGB::White);
 
-uint8_t currentPatternIndex = 0; // Index number of which pattern is current
+volatile uint8_t currentPatternIndex = 0; // Index number of which pattern is current
 uint8_t autoplay = 0;
 
 uint8_t autoplayDuration = 10;
@@ -181,7 +191,7 @@ PatternAndNameList patterns = {
   { showSolidColor,         "Solid Color" }
 };
 
-const uint8_t patternCount = ARRAY_SIZE(patterns);
+volatile const uint8_t patternCount = ARRAY_SIZE(patterns);
 
 typedef struct {
   CRGBPalette16 palette;
@@ -215,14 +225,39 @@ const String paletteNames[paletteCount] = {
 
 #include "Fields.h"
 
+volatile long nxtBtnLastUpdate = 0;
+
+void buttonPressed()
+{  
+  if (digitalRead(NEXT_BUTTON_PIN) == LOW)
+  {
+    if(millis() - nxtBtnLastUpdate < BTN_TRASHHOLD)
+      return;
+
+    nxtBtnLastUpdate = millis();
+
+    Serial.println("NEXT_BUTTON_PIN pressed!");
+    Serial.println(nxtBtnLastUpdate);
+
+    currentPatternIndex++;
+
+    // wrap around at the ends
+    if (currentPatternIndex >= patternCount)
+      currentPatternIndex = 0;
+  }
+}
+
 void setup() {
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
+
+  pinMode(NEXT_BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(NEXT_BUTTON_PIN), buttonPressed, FALLING);
 
   Serial.begin(115200);
   delay(100);
   Serial.setDebugOutput(true);
-
-  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);         // for WS2812 (Neopixel)
+  FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);
+  //FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);         // for WS2812 (Neopixel)
   //FastLED.addLeds<LED_TYPE,DATA_PIN,CLK_PIN,COLOR_ORDER>(leds, NUM_LEDS); // for APA102 (Dotstar)
   FastLED.setDither(false);
   FastLED.setCorrection(TypicalLEDStrip);
@@ -269,25 +304,19 @@ void setup() {
   {
     WiFi.mode(WIFI_AP);
 
+// setupConfigPortal
     // Do a little work to get a unique-ish name. Append the
     // last two bytes of the MAC (HEX'd) to "Thing-":
     uint8_t mac[WL_MAC_ADDR_LENGTH];
     WiFi.softAPmacAddress(mac);
-    String macID = String(mac[WL_MAC_ADDR_LENGTH - 2], HEX) +
-                   String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
-    macID.toUpperCase();
-    String AP_NameString = "ESP8266 Thing " + macID;
+    WiFi.softAP("the moon", WiFiAPPSK);
 
-    char AP_NameChar[AP_NameString.length() + 1];
-    memset(AP_NameChar, 0, AP_NameString.length() + 1);
-
-    for (int i = 0; i < AP_NameString.length(); i++)
-      AP_NameChar[i] = AP_NameString.charAt(i);
-
-    WiFi.softAP(AP_NameChar, WiFiAPPSK);
-
-    Serial.printf("Connect to Wi-Fi access point: %s\n", AP_NameChar);
+    Serial.printf("Connect to Wi-Fi access point: %s\n", "the moon");
     Serial.println("and open http://192.168.4.1 in your browser");
+
+    // Redirect all to ap ip
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
   }
   else
   {
@@ -431,6 +460,18 @@ void setup() {
 
   webServer.serveStatic("/", SPIFFS, "/", "max-age=86400");
 
+  webServer.on("/wifi", captivePortal);
+  webServer.on("/0wifi", captivePortal);
+  webServer.on("/wifisave", captivePortal);
+  webServer.on("/fwlink", captivePortal);
+
+  // webServer.serveStatic("/wifi", SPIFFS, "/", "max-age=86400");
+  // webServer.serveStatic("/0wifi", SPIFFS, "/", "max-age=86400");
+  // webServer.serveStatic("/wifisave", SPIFFS, "/", "max-age=86400");
+  // webServer.serveStatic("/fwlink", SPIFFS, "/", "max-age=86400");
+  // webServer.serveStatic("/generate_204", SPIFFS, "/", "max-age=86400");
+
+
   webServer.begin();
   Serial.println("HTTP web server started");
 
@@ -439,6 +480,39 @@ void setup() {
   //  Serial.println("Web socket server started");
 
   autoPlayTimeout = millis() + (autoplayDuration * 1000);
+}
+
+bool captivePortal()
+{
+  if (!isIp(webServer.hostHeader()) ) {
+    //DEBUG_WM(F("Request redirected to captive portal"));
+    webServer.sendHeader("Location", String("http://") + toStringIp(webServer.client().localIP()), true);
+    webServer.send ( 302, "text/plain", ""); // Empty content inhibits Content-length header so we have to close the socket ourselves.
+    webServer.client().stop(); // Stop is needed because we sent no content length
+    return true;
+  }
+  return false;
+}
+
+/** Is this an IP? */
+boolean isIp(String str) {
+  for (size_t i = 0; i < str.length(); i++) {
+    int c = str.charAt(i);
+    if (c != '.' && (c < '0' || c > '9')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** IP to String? */
+String toStringIp(IPAddress ip) {
+  String res = "";
+  for (int i = 0; i < 3; i++) {
+    res += String((ip >> (8 * i)) & 0xFF) + ".";
+  }
+  res += String(((ip >> 8 * 3)) & 0xFF);
+  return res;
 }
 
 void sendInt(uint8_t value)
@@ -467,7 +541,7 @@ void loop() {
   // Add entropy to random number generator; we use a lot of it.
   random16_add_entropy(random(65535));
 
-  //  dnsServer.processNextRequest();
+  dnsServer.processNextRequest();
   //  webSocketsServer.loop();
   webServer.handleClient();
 
